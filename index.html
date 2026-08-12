@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Independent Movie Stream Backend Test</title>
+  <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0d0f12;
+      color: #ffffff;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container {
+      width: 100%;
+      max-width: 850px;
+    }
+    h2 {
+      margin-bottom: 5px;
+    }
+    p.subtitle {
+      color: #8a96a3;
+      margin-top: 0;
+      margin-bottom: 20px;
+      font-size: 0.9em;
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    input[type="text"] {
+      flex: 1;
+      padding: 12px;
+      border-radius: 6px;
+      border: 1px solid #2d333b;
+      background: #161b22;
+      color: #fff;
+      font-size: 14px;
+    }
+    button {
+      padding: 12px 24px;
+      border: none;
+      border-radius: 6px;
+      background: #238636;
+      color: #fff;
+      font-weight: bold;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background: #2ea043;
+    }
+    .player-wrapper {
+      width: 100%;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+      background: #000;
+    }
+    .log-box {
+      margin-top: 15px;
+      padding: 10px;
+      background: #161b22;
+      border-radius: 6px;
+      border: 1px solid #2d333b;
+      font-family: monospace;
+      font-size: 12px;
+      color: #7ee787;
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+    .log-error {
+      color: #ff7b72;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h2>Standalone Stream Backend</h2>
+    <p class="subtitle">Live Scraping via Cloudflare Worker &middot; Proxying with <code>moviebox.ph</code> Headers</p>
+
+    <div class="controls">
+      <input 
+        type="text" 
+        id="movieTitle" 
+        value="Moana" 
+        placeholder="Enter movie title..." 
+      />
+      <button onclick="fetchMovieStream()">Load Movie</button>
+    </div>
+
+    <div class="player-wrapper">
+      <video id="player" playsinline controls crossorigin></video>
+    </div>
+
+    <div id="log" class="log-box" style="display: none;"></div>
+  </div>
+
+  <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+  <script>
+    const player = new Plyr('#player');
+
+    async function fetchMovieStream() {
+      const title = document.getElementById("movieTitle").value.trim();
+      const logBox = document.getElementById("log");
+      
+      logBox.style.display = "block";
+      logBox.className = "log-box";
+      logBox.innerText = `[1/2] Searching Moviebox.ph for "${title}" via /api/get-stream...`;
+
+      try {
+        const response = await fetch("/api/get-stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            activeTVShowData: { title: title },
+            currentMediaType: "movie"
+          })
+        });
+
+        const data = await response.json();
+
+        if (!data.success || !data.realQualitySources || data.realQualitySources.length === 0) {
+          logBox.className = "log-box log-error";
+          logBox.innerText = `Error: ${data.error || 'No streams found for this title.'}`;
+          return;
+        }
+
+        const primaryStream = data.realQualitySources[0].src;
+        logBox.innerText = `[2/2] Live stream found! Playing proxied stream:\n${primaryStream}`;
+
+        // Feed dynamically scraped streams into Plyr
+        player.source = {
+          type: 'video',
+          sources: data.realQualitySources.map(src => ({
+            src: src.src,
+            type: 'video/mp4',
+            size: src.size || 1080
+          }))
+        };
+        
+        player.play();
+      } catch (err) {
+        logBox.className = "log-box log-error";
+        logBox.innerText = `Error connecting to API: ${err.message}`;
+      }
+    }
+  </script>
+</body>
+</html>
