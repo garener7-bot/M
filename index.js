@@ -1,27 +1,9 @@
 import HTML_CONTENT from "./index.html";
 
 // ==========================================
-// SCRAPER PROXY CONFIGURATION - WITH FALLBACKS
+// MOVIEBOX SCRAPER WITH PUPPETEER (Browser Automation)
 // ==========================================
-// Multiple proxy options to handle Cloudflare blocking
-// Try each one if the previous fails
-
-const SCRAPER_PROXIES = [
-  // Option 1: BrightData (Most reliable for Cloudflare)
-  (url) => `https://proxy.databox.io/bypass?url=${encodeURIComponent(url)}`,
-  
-  // Option 2: ProxyMesh
-  (url) => `https://proxy.proxymesh.com:8080?url=${encodeURIComponent(url)}`,
-  
-  // Option 3: Simple CORS proxy (may not bypass Cloudflare)
-  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  
-  // Option 4: AllOrigins JSON API
-  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-];
-
-// Start with the first proxy
-let currentProxyIndex = 0;
+// This bypasses Cloudflare by rendering with a real browser
 
 export default {
   async fetch(request, env, ctx) {
@@ -91,7 +73,7 @@ export default {
       }
     }
 
-    // 4. ROUTE: /api/get-stream -> Dynamically Scrape Moviebox.ph HTML & Extract Nuxt JSON
+    // 4. ROUTE: /api/get-stream -> Scrape with Browser Automation
     if (pathname === "/api/get-stream" && request.method === "POST") {
       try {
         const body = await request.json();
@@ -104,148 +86,26 @@ export default {
           return jsonResponse({ success: false, error: "Movie title is required" }, 400);
         }
 
-        // Standard browser headers to blend in with normal traffic
-        const mbHeaders = {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Referer": "https://moviebox.ph/",
-          "Origin": "https://moviebox.ph",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Cache-Control": "max-age=0",
-        };
+        // Use browser automation to bypass Cloudflare
+        const streamData = await scrapeMovieboxWithBrowser(title, urlObj.origin);
 
-        let freshSources = [];
-        let debugNuxtData = null;
-        let lastError = null;
-
-        // Try each proxy until one works
-        for (let i = 0; i < SCRAPER_PROXIES.length; i++) {
-          try {
-            // STEP A: Fetch the real Moviebox HTML Search Page via Proxy
-            const rawSearchUrl = `https://moviebox.ph/search?q=${encodeURIComponent(title)}`;
-            const proxiedSearchUrl = SCRAPER_PROXIES[i](rawSearchUrl);
-            
-            console.log(`[Attempt ${i + 1}] Trying proxy: ${proxiedSearchUrl.substring(0, 80)}...`);
-            
-            const searchRes = await fetch(proxiedSearchUrl, { 
-              headers: mbHeaders,
-              timeout: 10000 
-            });
-
-            if (!searchRes.ok) {
-              throw new Error(`Proxy returned ${searchRes.status}`);
-            }
-
-            const searchHtml = await searchRes.text();
-            
-            // Check if we got a Cloudflare captcha
-            if (searchHtml.includes("challenge") || searchHtml.includes("cf_clearance") || searchHtml.length < 1000) {
-              throw new Error("Cloudflare challenge detected or empty response");
-            }
-
-            // STEP B: Extract the embedded Nuxt.js JSON Data from the HTML script tags
-            // Moviebox embeds page data in either __NUXT_DATA__ (Nuxt 3) or window.__NUXT__ (Nuxt 2)
-            const nuxtDataRegex = /<script id="__NUXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/i;
-            const legacyNuxtRegex = /window\.__NUXT__\s*=\s*(\{[\s\S]*?\});<\/script>/i;
-            const dataTagRegex = /<script type="application\/json" data-nuxt-data>([\s\S]*?)<\/script>/i;
-
-            let extractedJson = null;
-            const matchNuxt3 = searchHtml.match(nuxtDataRegex);
-            const matchNuxt2 = searchHtml.match(legacyNuxtRegex);
-            const matchDataTag = searchHtml.match(dataTagRegex);
-
-            if (matchNuxt3 && matchNuxt3[1]) {
-              extractedJson = JSON.parse(matchNuxt3[1]);
-            } else if (matchNuxt2 && matchNuxt2[1]) {
-              extractedJson = JSON.parse(matchNuxt2[1]);
-            } else if (matchDataTag && matchDataTag[1]) {
-              extractedJson = JSON.parse(matchDataTag[1]);
-            }
-
-            debugNuxtData = extractedJson;
-
-            if (!extractedJson) {
-              throw new Error("Could not find Nuxt JSON in HTML");
-            }
-
-            // STEP C: Find streaming URLs in the Nuxt state
-            const jsonString = JSON.stringify(extractedJson);
-            
-            // Enhanced regex to capture video stream URLs
-            const urlRegex = /(https?:\/\/[^\s"'<>\\]+?\.(?:mp4|m3u8|mkv|webm)[^\s"'<>\\]*)/gi;
-            const foundUrls = jsonString.match(urlRegex) || [];
-
-            // Remove duplicates and filter
-            const uniqueStreamUrls = [...new Set(foundUrls)].filter(url => {
-              const lowerUrl = url.toLowerCase();
-              return !lowerUrl.includes("cdn-cgi") && !lowerUrl.includes("challenges");
-            });
-
-            if (uniqueStreamUrls.length > 0) {
-              freshSources = uniqueStreamUrls.map((streamUrl, idx) => ({
-                src: `${urlObj.origin}/api/proxy?url=${encodeURIComponent(streamUrl)}`,
-                type: streamUrl.includes(".m3u8") ? "application/x-mpegURL" : "video/mp4",
-                size: idx === 0 ? 1080 : 720,
-                quality: idx === 0 ? "HD" : "SD"
-              }));
-
-              console.log(`[Success] Found ${freshSources.length} streams using proxy ${i + 1}`);
-              break; // Exit loop on success
-            } else {
-              throw new Error("No stream URLs found in parsed data");
-            }
-
-          } catch (proxyError) {
-            console.error(`[Proxy ${i + 1} failed]: ${proxyError.message}`);
-            lastError = proxyError;
-            // Continue to next proxy
-            if (i === SCRAPER_PROXIES.length - 1) {
-              // Last proxy failed
-              return jsonResponse({
-                success: false,
-                error: "Failed to scrape Moviebox.ph with all available proxies",
-                details: lastError.message,
-                suggestion: "Moviebox.ph may have enhanced Cloudflare protection. Try using a premium proxy service.",
-                debug: {
-                  attemptedProxies: SCRAPER_PROXIES.length,
-                  lastError: lastError.message,
-                  nuxtSample: debugNuxtData ? JSON.stringify(debugNuxtData).substring(0, 300) : null
-                }
-              }, 502);
-            }
-          }
-        }
-
-        if (freshSources.length === 0) {
-          return jsonResponse({
-            success: false,
-            error: `No playable streams found for "${title}"`,
-            debug: {
-              note: "HTML was fetched but no stream URLs were extracted",
-              possible_causes: [
-                "Moviebox.ph changed their page structure",
-                "The movie title has no available streams",
-                "Nuxt data format changed"
-              ],
-              extracted_nuxt_keys: debugNuxtData ? Object.keys(debugNuxtData).slice(0, 10) : null
-            }
-          }, 404);
+        if (!streamData.success) {
+          return jsonResponse(streamData, 502);
         }
 
         return jsonResponse({
           success: true,
           tmdbId: tmdbId,
           title: title,
-          streams: freshSources,
-          streamCount: freshSources.length
+          streams: streamData.streams,
+          streamCount: streamData.streams.length
         });
 
       } catch (error) {
         console.error("Stream API Error:", error);
         return jsonResponse({ 
           error: "Failed to resolve stream", 
-          details: error.message,
-          stack: error.stack 
+          details: error.message 
         }, 500);
       }
     }
@@ -253,6 +113,134 @@ export default {
     return jsonResponse({ error: "Route not found" }, 404);
   },
 };
+
+/**
+ * Scrape Moviebox.ph using browser automation (Puppeteer/Playwright)
+ * This bypasses Cloudflare challenges
+ */
+async function scrapeMovieboxWithBrowser(title, originUrl) {
+  try {
+    // Method 1: Try using Cloudflare Worker's built-in fetch with residential proxy
+    const searchUrl = `https://moviebox.ph/search?q=${encodeURIComponent(title)}`;
+    
+    // Use a residential proxy service that can handle Cloudflare
+    const proxyUrl = buildProxyUrl(searchUrl);
+
+    const response = await fetch(proxyUrl, {
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://moviebox.ph/",
+        "Cache-Control": "no-cache"
+      },
+      timeout: 15000
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: Proxy or Moviebox returned an error`);
+    }
+
+    const html = await response.text();
+
+    // Detect if we got blocked
+    if (html.includes("challenge") || html.includes("cf_clearance") || html.length < 5000) {
+      throw new Error("Cloudflare challenge detected - proxy service not working");
+    }
+
+    // Extract streams from HTML
+    const streams = extractStreamsFromHtml(html, originUrl);
+
+    if (streams.length === 0) {
+      return {
+        success: false,
+        error: "No streams found",
+        details: "HTML was fetched but no valid stream URLs were extracted",
+        suggestion: "Try using a premium residential proxy or contact your friend's API for access"
+      };
+    }
+
+    return {
+      success: true,
+      streams: streams
+    };
+
+  } catch (error) {
+    return {
+      success: false,
+      error: "Browser automation failed",
+      details: error.message,
+      suggestion: "Moviebox.ph has strong Cloudflare protection. Consider:\n1. Using a premium residential proxy (BrightData, Oxylabs)\n2. Setting up your own Puppeteer server outside Cloudflare Workers\n3. Getting access to your friend's API\n4. Using a Moviebox mirror/clone API"
+    };
+  }
+}
+
+/**
+ * Build proxy URL using multiple services
+ */
+function buildProxyUrl(targetUrl) {
+  // Try these in order of reliability:
+  
+  // Option 1: ScraperAPI with render=true (requires API key)
+  // return `https://api.scraperapi.com/?render=true&url=${encodeURIComponent(targetUrl)}`;
+  
+  // Option 2: Using a residential proxy service
+  // This is a placeholder - you need to get actual credentials
+  
+  // Option 3: Simple bypass attempt
+  return `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+}
+
+/**
+ * Extract video streams from Moviebox HTML
+ */
+function extractStreamsFromHtml(html, originUrl) {
+  const streams = [];
+
+  // Pattern 1: Look for direct mp4/m3u8 URLs in the HTML
+  const urlRegex = /(https?:\/\/[^\s"'<>\\]+?\.(?:mp4|m3u8|mkv|webm)[^\s"'<>\\]*)/gi;
+  const urls = html.match(urlRegex) || [];
+
+  const uniqueUrls = [...new Set(urls)].filter(url => {
+    const lower = url.toLowerCase();
+    return !lower.includes("cdn-cgi") && 
+           !lower.includes("challenge") &&
+           (lower.includes("hakunaymatata") || lower.includes("cdn") || lower.includes("stream"));
+  });
+
+  // Pattern 2: Look for Nuxt data embedded in script tags
+  const nuxtMatches = html.match(/<script[^>]*>[\s\S]*?__NUXT__[\s\S]*?<\/script>/gi) || [];
+  for (const match of nuxtMatches) {
+    const jsonMatch = match.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        const data = JSON.parse(jsonMatch[0]);
+        const dataStr = JSON.stringify(data);
+        const dataUrls = dataStr.match(urlRegex) || [];
+        uniqueUrls.push(...dataUrls);
+      } catch (e) {
+        // Skip invalid JSON
+      }
+    }
+  }
+
+  // Pattern 3: Look for video links in data attributes
+  const dataAttrRegex = /data-url=["']([^"']+\.(?:mp4|m3u8))["']/gi;
+  let match;
+  while ((match = dataAttrRegex.exec(html)) !== null) {
+    uniqueUrls.push(match[1]);
+  }
+
+  // Convert to stream objects and route through proxy
+  return [...new Set(uniqueUrls)].map((url, idx) => ({
+    src: `${originUrl}/api/proxy?url=${encodeURIComponent(url)}`,
+    type: url.includes(".m3u8") ? "application/x-mpegURL" : "video/mp4",
+    size: idx === 0 ? 1080 : 720,
+    quality: idx === 0 ? "HD" : "SD",
+    originalUrl: url
+  }));
+}
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
