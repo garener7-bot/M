@@ -1,0 +1,13 @@
+{
+  "name": "moviebox-worker-backend",
+  "version": "1.0.0",
+  "description": "Standalone Moviebox.ph Stream Scraper & Proxy Backend with Test UI",
+  "main": "index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
